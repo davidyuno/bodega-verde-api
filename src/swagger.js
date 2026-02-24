@@ -1,5 +1,9 @@
 import swaggerJsdoc from 'swagger-jsdoc';
 import swaggerUi from 'swagger-ui-express';
+import { fileURLToPath } from 'url';
+import { join, dirname } from 'path';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const options = {
   definition: {
@@ -20,7 +24,8 @@ const options = {
       { name: 'Analytics', description: 'Trend analysis and statistics' },
     ],
   },
-  apis: ['./src/routes/*.js'],
+  // Use absolute path so the glob works in any working directory (including Vercel)
+  apis: [join(__dirname, 'routes', '*.js')],
 };
 
 export const swaggerSpec = swaggerJsdoc(options);
