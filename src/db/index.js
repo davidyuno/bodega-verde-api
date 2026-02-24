@@ -6,7 +6,9 @@ import { join } from 'path';
 const dbPath = process.env.DB_PATH || (
   process.env.NODE_ENV === 'test'
     ? ':memory:'
-    : join(process.cwd(), 'bodega.db')
+    : process.env.VERCEL
+      ? '/tmp/bodega.db'
+      : join(process.cwd(), 'bodega.db')
 );
 
 const sqlite = new Database(dbPath);
