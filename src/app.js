@@ -1,6 +1,5 @@
 import express from 'express';
-import swaggerUi from 'swagger-ui-express';
-import { swaggerSpec } from './swagger.js';
+import { swaggerUi, swaggerSpec } from './swagger.js';
 import { runMigrations } from './db/migrate.js';
 import ingestRouter from './routes/ingest.js';
 import reconciliationRouter from './routes/reconciliation.js';
@@ -14,13 +13,16 @@ export function createApp() {
   const app = express();
   app.use(express.json());
 
-  // Swagger UI
-  app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
-    customSiteTitle: 'Bodega Verde API',
-  }));
-  app.get('/api/docs.json', (req, res) => res.json(swaggerSpec));
+  // Ingestion, Orders, Analytics
+  app.use('/api/ingest', ingestRouter);
+  app.use('/api/orders', ordersRouter);
+  app.use('/api/analytics', analyticsRouter);
 
-  // Health
+  // Reconciliation router owns /api/reconcile[/batch] and /api/reconciliation/*
+  // Mount at /api so the router's internal paths (/reconcile, /reconcile/batch,
+  // /reconciliation/summary, etc.) resolve to the correct full paths.
+  app.use('/api', reconciliationRouter);
+
   /**
    * @swagger
    * /api/health:
@@ -35,12 +37,8 @@ export function createApp() {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
-  // Routes
-  app.use('/api/ingest', ingestRouter);
-  app.use('/api/reconcile', reconciliationRouter);
-  app.use('/api/reconciliation', reconciliationRouter);
-  app.use('/api/orders', ordersRouter);
-  app.use('/api/analytics', analyticsRouter);
+  // Swagger UI
+  app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
   // 404
   app.use((req, res) => {
@@ -51,3 +49,5 @@ export function createApp() {
 
   return app;
 }
+
+export default createApp();

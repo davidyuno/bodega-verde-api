@@ -1,12 +1,11 @@
 import 'dotenv/config';
-import { createApp } from '../src/app.js';
+import app from '../src/app.js';
 
-const app = createApp();
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
-  console.log(`Bodega Verde API running on http://localhost:${PORT}`);
-  console.log(`Swagger UI: http://localhost:${PORT}/api/docs`);
-});
+// Only listen when not in Vercel (local dev)
+if (process.env.VERCEL !== '1') {
+  app.listen(PORT, () => console.log(`Bodega Verde API running on port ${PORT}`));
+}
 
 export default app;

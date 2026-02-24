@@ -1,14 +1,18 @@
 import { Router } from 'express';
-import { reconcile } from '../services/reconciler.js';
 import { db } from '../db/index.js';
+import { reconcileDate, reconcileDateRange } from '../services/reconciler.js';
 
 const router = Router();
+
+// ---------------------------------------------------------------------------
+// POST /api/reconcile
+// ---------------------------------------------------------------------------
 
 /**
  * @swagger
  * /api/reconcile:
  *   post:
- *     summary: Trigger reconciliation for a date or all data
+ *     summary: Trigger reconciliation for a specific date or for all available dates
  *     tags: [Reconciliation]
  *     requestBody:
  *       content:
@@ -18,29 +22,76 @@ const router = Router();
  *             properties:
  *               date:
  *                 type: string
+ *                 format: date
+ *                 description: ISO date to reconcile (YYYY-MM-DD). Omit to reconcile all dates.
  *                 example: "2024-01-15"
  *               store_id:
  *                 type: string
+ *                 description: Limit reconciliation to one store. Only relevant when date is provided.
  *                 example: "CDMX-001"
  *     responses:
  *       200:
- *         description: Reconciliation summary
+ *         description: Reconciliation completed successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *                 reconciled:
+ *                   type: integer
+ *                   description: Number of reconciliation records produced
+ *                 records:
+ *                   type: array
+ *                   items:
+ *                     type: object
  */
-router.post('/', (req, res, next) => {
+router.post('/reconcile', async (req, res, next) => {
   try {
     const { date, store_id } = req.body || {};
-    const result = reconcile(date || null, store_id || null);
-    res.json({ success: true, result });
+
+    let records = [];
+
+    if (!date) {
+      // Reconcile every distinct pickup_date found in the orders table
+      const dates = db
+        .prepare('SELECT DISTINCT pickup_date FROM orders ORDER BY pickup_date')
+        .all()
+        .map(r => r.pickup_date);
+
+      for (const d of dates) {
+        const dayRecords = reconcileDate(d, store_id || undefined);
+        records.push(...dayRecords);
+      }
+    } else {
+      records = reconcileDate(date, store_id || undefined);
+    }
+
+    res.json({
+      success: true,
+      message: date
+        ? `Reconciled ${records.length} orders for date ${date}${store_id ? ` / store ${store_id}` : ''}`
+        : `Reconciled ${records.length} orders across all dates`,
+      reconciled: records.length,
+      records,
+    });
   } catch (err) {
     next(err);
   }
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/reconcile/batch
+// ---------------------------------------------------------------------------
+
 /**
  * @swagger
  * /api/reconcile/batch:
  *   post:
- *     summary: Reconcile a date range (batch)
+ *     summary: Reconcile a date range in a single request
  *     tags: [Reconciliation]
  *     requestBody:
  *       required: true
@@ -48,245 +99,393 @@ router.post('/', (req, res, next) => {
  *         application/json:
  *           schema:
  *             type: object
- *             required: [from, to]
+ *             required:
+ *               - from
+ *               - to
  *             properties:
  *               from:
  *                 type: string
+ *                 format: date
+ *                 description: Start date inclusive (YYYY-MM-DD)
  *                 example: "2024-01-15"
  *               to:
  *                 type: string
+ *                 format: date
+ *                 description: End date inclusive (YYYY-MM-DD)
  *                 example: "2024-01-19"
  *               store_id:
  *                 type: string
+ *                 description: Optionally limit to one store
+ *                 example: "CDMX-001"
  *     responses:
  *       200:
- *         description: Batch reconciliation summary per day
+ *         description: Batch reconciliation completed successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *                 reconciled:
+ *                   type: integer
+ *                 records:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *       400:
+ *         description: Validation error — from and to are required, and from must be <= to
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: false
+ *                 error:
+ *                   type: string
  */
-router.post('/batch', (req, res, next) => {
+router.post('/reconcile/batch', (req, res, next) => {
   try {
     const { from, to, store_id } = req.body || {};
+
     if (!from || !to) {
-      return res.status(400).json({ success: false, error: '"from" and "to" dates are required' });
+      return res.status(400).json({
+        success: false,
+        error: '"from" and "to" date fields are required',
+      });
     }
 
-    const dates = getDatesInRange(from, to);
-    const results = dates.map(date => ({
-      date,
-      ...reconcile(date, store_id || null),
-    }));
+    if (from > to) {
+      return res.status(400).json({
+        success: false,
+        error: '"from" date must be less than or equal to "to" date',
+      });
+    }
 
-    const totals = results.reduce((acc, r) => {
-      acc.reconciled += r.reconciled;
-      acc.matched += r.matched;
-      acc.over_collection += r.over_collection;
-      acc.under_collection += r.under_collection;
-      acc.unaccounted += r.unaccounted;
-      return acc;
-    }, { reconciled: 0, matched: 0, over_collection: 0, under_collection: 0, unaccounted: 0 });
+    const records = reconcileDateRange(from, to, store_id || undefined);
 
-    res.json({ success: true, from, to, daily: results, totals });
+    res.json({
+      success: true,
+      message: `Reconciled ${records.length} orders from ${from} to ${to}${store_id ? ` for store ${store_id}` : ''}`,
+      reconciled: records.length,
+      records,
+    });
   } catch (err) {
     next(err);
   }
 });
+
+// ---------------------------------------------------------------------------
+// GET /api/reconciliation/summary
+// ---------------------------------------------------------------------------
 
 /**
  * @swagger
  * /api/reconciliation/summary:
  *   get:
- *     summary: Reconciliation summary for a date range
+ *     summary: Aggregated reconciliation summary grouped by store and date
  *     tags: [Reconciliation]
  *     parameters:
  *       - in: query
  *         name: from
- *         schema: { type: string }
+ *         schema:
+ *           type: string
+ *           format: date
+ *         description: Start date inclusive (YYYY-MM-DD)
  *         example: "2024-01-15"
  *       - in: query
  *         name: to
- *         schema: { type: string }
+ *         schema:
+ *           type: string
+ *           format: date
+ *         description: End date inclusive (YYYY-MM-DD)
  *         example: "2024-01-19"
  *       - in: query
  *         name: store_id
- *         schema: { type: string }
+ *         schema:
+ *           type: string
+ *         description: Filter by store
+ *         example: "CDMX-001"
  *       - in: query
  *         name: region
- *         schema: { type: string }
+ *         schema:
+ *           type: string
+ *         description: Filter by region (requires JOIN with orders table)
+ *         example: "cdmx"
  *     responses:
  *       200:
- *         description: Summary stats grouped by store and date
+ *         description: Summary grouped by store_id and reconciliation_date
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       store_id:
+ *                         type: string
+ *                       region:
+ *                         type: string
+ *                       date:
+ *                         type: string
+ *                       total_orders:
+ *                         type: integer
+ *                       matched:
+ *                         type: integer
+ *                       over_collection:
+ *                         type: integer
+ *                       under_collection:
+ *                         type: integer
+ *                       unaccounted:
+ *                         type: integer
+ *                       total_expected:
+ *                         type: number
+ *                       total_actual:
+ *                         type: number
+ *                       total_variance:
+ *                         type: number
+ *                       high_priority_count:
+ *                         type: integer
  */
-router.get('/summary', (req, res, next) => {
+router.get('/reconciliation/summary', (req, res, next) => {
   try {
     const { from, to, store_id, region } = req.query;
-
-    let query = `
-      SELECT
-        r.store_id,
-        r.reconciliation_date,
-        COUNT(*) as total_orders,
-        SUM(CASE WHEN r.status = 'matched' THEN 1 ELSE 0 END) as matched,
-        SUM(CASE WHEN r.status = 'over_collection' THEN 1 ELSE 0 END) as over_collection,
-        SUM(CASE WHEN r.status = 'under_collection' THEN 1 ELSE 0 END) as under_collection,
-        SUM(CASE WHEN r.status = 'unaccounted' THEN 1 ELSE 0 END) as unaccounted,
-        SUM(r.expected_amount) as total_expected,
-        SUM(COALESCE(r.actual_amount, 0)) as total_actual,
-        SUM(COALESCE(r.variance_amount, -r.expected_amount)) as total_variance,
-        SUM(r.is_high_priority) as high_priority_count
-      FROM reconciliations r
-    `;
 
     const conditions = [];
     const params = [];
 
-    if (store_id) { conditions.push('r.store_id = ?'); params.push(store_id); }
-    if (from) { conditions.push('r.reconciliation_date >= ?'); params.push(from); }
-    if (to) { conditions.push('r.reconciliation_date <= ?'); params.push(to); }
-
+    if (store_id) {
+      conditions.push('r.store_id = ?');
+      params.push(store_id);
+    }
+    if (from) {
+      conditions.push('r.reconciliation_date >= ?');
+      params.push(from);
+    }
+    if (to) {
+      conditions.push('r.reconciliation_date <= ?');
+      params.push(to);
+    }
     if (region) {
-      query += ` JOIN orders o ON r.order_id = o.order_id`;
       conditions.push('o.region = ?');
       params.push(region);
     }
 
-    if (conditions.length > 0) query += ` WHERE ${conditions.join(' AND ')}`;
-    query += ` GROUP BY r.store_id, r.reconciliation_date ORDER BY r.reconciliation_date, r.store_id`;
+    // When filtering by region we must JOIN with orders; otherwise a plain
+    // query on reconciliations is sufficient and more efficient.
+    const joinClause = region
+      ? 'JOIN orders o ON r.order_id = o.order_id'
+      : '';
 
-    const rows = db.prepare(query).all(...params);
+    // Include region in the SELECT + GROUP BY only when it is filtered/needed
+    const regionSelect = region ? ', o.region AS region' : '';
+    const regionGroup = region ? ', o.region' : '';
 
-    const totals = rows.reduce((acc, r) => {
-      acc.total_orders += r.total_orders;
-      acc.matched += r.matched;
-      acc.over_collection += r.over_collection;
-      acc.under_collection += r.under_collection;
-      acc.unaccounted += r.unaccounted;
-      acc.total_expected = round2((acc.total_expected || 0) + r.total_expected);
-      acc.total_actual = round2((acc.total_actual || 0) + r.total_actual);
-      acc.total_variance = round2((acc.total_variance || 0) + r.total_variance);
-      return acc;
-    }, { total_orders: 0, matched: 0, over_collection: 0, under_collection: 0, unaccounted: 0 });
+    const whereClause = conditions.length > 0
+      ? `WHERE ${conditions.join(' AND ')}`
+      : '';
 
-    res.json({ success: true, summary: rows, totals });
+    const sql = `
+      SELECT
+        r.store_id,
+        r.reconciliation_date                                          AS date
+        ${regionSelect},
+        COUNT(*)                                                       AS total_orders,
+        SUM(CASE WHEN r.status = 'matched'          THEN 1 ELSE 0 END) AS matched,
+        SUM(CASE WHEN r.status = 'over_collection'  THEN 1 ELSE 0 END) AS over_collection,
+        SUM(CASE WHEN r.status = 'under_collection' THEN 1 ELSE 0 END) AS under_collection,
+        SUM(CASE WHEN r.status = 'unaccounted'      THEN 1 ELSE 0 END) AS unaccounted,
+        ROUND(SUM(r.expected_amount), 2)                               AS total_expected,
+        ROUND(SUM(COALESCE(r.actual_amount, 0)), 2)                    AS total_actual,
+        ROUND(SUM(COALESCE(r.variance_amount, 0)), 2)                  AS total_variance,
+        SUM(r.is_high_priority)                                        AS high_priority_count
+      FROM reconciliations r
+      ${joinClause}
+      ${whereClause}
+      GROUP BY r.store_id, r.reconciliation_date${regionGroup}
+      ORDER BY r.reconciliation_date, r.store_id
+    `;
+
+    const data = db.prepare(sql).all(...params);
+
+    res.json({ data });
   } catch (err) {
     next(err);
   }
 });
+
+// ---------------------------------------------------------------------------
+// GET /api/reconciliation/discrepancies
+// ---------------------------------------------------------------------------
 
 /**
  * @swagger
  * /api/reconciliation/discrepancies:
  *   get:
- *     summary: List all discrepancies with optional filters
+ *     summary: List non-matched reconciliation records with optional filters
  *     tags: [Reconciliation]
  *     parameters:
  *       - in: query
  *         name: min_variance
- *         schema: { type: number }
- *         description: Minimum absolute variance in MXN
- *         example: 100
+ *         schema:
+ *           type: number
+ *         description: Minimum absolute variance amount in MXN
+ *         example: 50
  *       - in: query
  *         name: store_id
- *         schema: { type: string }
+ *         schema:
+ *           type: string
+ *         example: "CDMX-001"
  *       - in: query
  *         name: from
- *         schema: { type: string }
+ *         schema:
+ *           type: string
+ *           format: date
+ *         example: "2024-01-15"
  *       - in: query
  *         name: to
- *         schema: { type: string }
+ *         schema:
+ *           type: string
+ *           format: date
+ *         example: "2024-01-19"
  *       - in: query
  *         name: priority
- *         schema: { type: boolean }
- *         description: If true, return only high-priority discrepancies
+ *         schema:
+ *           type: string
+ *           enum: ["true", "false"]
+ *         description: When "true", return only high-priority discrepancies
+ *         example: "true"
  *     responses:
  *       200:
- *         description: List of discrepancies
+ *         description: Discrepancy records ordered by absolute variance descending
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                 count:
+ *                   type: integer
  */
-router.get('/discrepancies', (req, res, next) => {
+router.get('/reconciliation/discrepancies', (req, res, next) => {
   try {
     const { min_variance, store_id, from, to, priority } = req.query;
 
-    let query = `SELECT * FROM reconciliations WHERE status != 'matched'`;
+    let sql = "SELECT * FROM reconciliations WHERE status != 'matched'";
     const params = [];
 
-    if (priority === 'true') { query += ` AND is_high_priority = 1`; }
-    if (store_id) { query += ` AND store_id = ?`; params.push(store_id); }
-    if (from) { query += ` AND reconciliation_date >= ?`; params.push(from); }
-    if (to) { query += ` AND reconciliation_date <= ?`; params.push(to); }
-    if (min_variance) {
-      query += ` AND ABS(COALESCE(variance_amount, expected_amount)) >= ?`;
+    if (priority === 'true') {
+      sql += ' AND is_high_priority = 1';
+    }
+    if (store_id) {
+      sql += ' AND store_id = ?';
+      params.push(store_id);
+    }
+    if (from) {
+      sql += ' AND reconciliation_date >= ?';
+      params.push(from);
+    }
+    if (to) {
+      sql += ' AND reconciliation_date <= ?';
+      params.push(to);
+    }
+    if (min_variance !== undefined && min_variance !== '') {
+      sql += ' AND ABS(variance_amount) >= ?';
       params.push(parseFloat(min_variance));
     }
 
-    query += ` ORDER BY ABS(COALESCE(variance_amount, expected_amount)) DESC`;
+    sql += ' ORDER BY ABS(COALESCE(variance_amount, expected_amount)) DESC';
 
-    const rows = db.prepare(query).all(...params);
-    res.json({ success: true, count: rows.length, discrepancies: rows });
+    const data = db.prepare(sql).all(...params);
+
+    res.json({ data, count: data.length });
   } catch (err) {
     next(err);
   }
 });
+
+// ---------------------------------------------------------------------------
+// GET /api/reconciliation/status
+// ---------------------------------------------------------------------------
 
 /**
  * @swagger
  * /api/reconciliation/status:
  *   get:
- *     summary: Per-order reconciliation status list
+ *     summary: Per-order reconciliation status list with optional filters
  *     tags: [Reconciliation]
  *     parameters:
  *       - in: query
  *         name: date
- *         schema: { type: string }
+ *         schema:
+ *           type: string
+ *           format: date
+ *         description: Filter by reconciliation date (YYYY-MM-DD)
  *         example: "2024-01-15"
  *       - in: query
  *         name: store_id
- *         schema: { type: string }
+ *         schema:
+ *           type: string
+ *         example: "CDMX-001"
  *       - in: query
  *         name: status
- *         schema: { type: string, enum: [matched, over_collection, under_collection, unaccounted] }
- *       - in: query
- *         name: page
- *         schema: { type: integer }
- *       - in: query
- *         name: limit
- *         schema: { type: integer }
+ *         schema:
+ *           type: string
+ *           enum: [matched, over_collection, under_collection, unaccounted]
+ *         description: Filter by reconciliation status
  *     responses:
  *       200:
- *         description: Paginated list of reconciliation records
+ *         description: Reconciliation records ordered by date desc then store
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                 count:
+ *                   type: integer
  */
-router.get('/status', (req, res, next) => {
+router.get('/reconciliation/status', (req, res, next) => {
   try {
-    const { date, store_id, status, page = 1, limit = 50 } = req.query;
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const { date, store_id, status } = req.query;
 
-    let query = `SELECT * FROM reconciliations WHERE 1=1`;
+    let sql = 'SELECT * FROM reconciliations WHERE 1=1';
     const params = [];
 
-    if (date) { query += ` AND reconciliation_date = ?`; params.push(date); }
-    if (store_id) { query += ` AND store_id = ?`; params.push(store_id); }
-    if (status) { query += ` AND status = ?`; params.push(status); }
+    if (date) {
+      sql += ' AND reconciliation_date = ?';
+      params.push(date);
+    }
+    if (store_id) {
+      sql += ' AND store_id = ?';
+      params.push(store_id);
+    }
+    if (status) {
+      sql += ' AND status = ?';
+      params.push(status);
+    }
 
-    query += ` ORDER BY reconciliation_date DESC, store_id LIMIT ? OFFSET ?`;
-    params.push(parseInt(limit), offset);
+    sql += ' ORDER BY reconciliation_date DESC, store_id';
 
-    const rows = db.prepare(query).all(...params);
-    res.json({ success: true, page: parseInt(page), limit: parseInt(limit), count: rows.length, records: rows });
+    const data = db.prepare(sql).all(...params);
+
+    res.json({ data, count: data.length });
   } catch (err) {
     next(err);
   }
 });
-
-function getDatesInRange(from, to) {
-  const dates = [];
-  const current = new Date(from);
-  const end = new Date(to);
-  while (current <= end) {
-    dates.push(current.toISOString().split('T')[0]);
-    current.setDate(current.getDate() + 1);
-  }
-  return dates;
-}
-
-function round2(n) {
-  return Math.round(n * 100) / 100;
-}
 
 export default router;

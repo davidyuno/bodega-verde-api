@@ -1,4 +1,5 @@
 import swaggerJsdoc from 'swagger-jsdoc';
+import swaggerUi from 'swagger-ui-express';
 
 const options = {
   definition: {
@@ -6,19 +7,7 @@ const options = {
     info: {
       title: 'Bodega Verde Cash Reconciliation API',
       version: '1.0.0',
-      description: `
-## Cash Reconciliation Engine
-
-Automates Bodega Verde's cash payment reconciliation workflow.
-
-**Quick start:**
-1. Upload \`data/seed/orders.csv\` via \`POST /api/ingest/orders\`
-2. Upload \`data/seed/cash_reports.csv\` via \`POST /api/ingest/cash-reports\`
-3. Run \`POST /api/reconcile\` to generate reconciliation results
-4. Query \`GET /api/reconciliation/summary\` or \`GET /api/reconciliation/discrepancies\`
-
-> **CSV uploads only accept \`.csv\` files.** Any other format returns a 400 error.
-      `,
+      description: 'API for automating cash payment reconciliation for Bodega Verde retail stores.',
     },
     servers: [
       { url: '/api', description: 'Current server' },
@@ -35,3 +24,4 @@ Automates Bodega Verde's cash payment reconciliation workflow.
 };
 
 export const swaggerSpec = swaggerJsdoc(options);
+export { swaggerUi };

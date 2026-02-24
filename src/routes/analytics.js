@@ -7,48 +7,82 @@ const router = Router();
  * @swagger
  * /api/analytics/stores:
  *   get:
- *     summary: Discrepancy rates and trends per store
+ *     summary: Discrepancy rates and trends per store over time
  *     tags: [Analytics]
  *     parameters:
  *       - in: query
  *         name: from
- *         schema: { type: string }
+ *         schema:
+ *           type: string
+ *         description: Start date (YYYY-MM-DD)
  *         example: "2024-01-15"
  *       - in: query
  *         name: to
- *         schema: { type: string }
+ *         schema:
+ *           type: string
+ *         description: End date (YYYY-MM-DD)
  *         example: "2024-01-19"
  *     responses:
  *       200:
  *         description: Per-store accuracy and discrepancy statistics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       store_id:
+ *                         type: string
+ *                       total_orders:
+ *                         type: integer
+ *                       matched:
+ *                         type: integer
+ *                       discrepancies:
+ *                         type: integer
+ *                       total_variance:
+ *                         type: number
+ *                       avg_variance_pct:
+ *                         type: number
+ *                       discrepancy_rate:
+ *                         type: number
  */
 router.get('/stores', (req, res, next) => {
   try {
     const { from, to } = req.query;
 
-    let query = `
+    const conditions = [];
+    const params = [];
+
+    if (from) { conditions.push('reconciliation_date >= ?'); params.push(from); }
+    if (to) { conditions.push('reconciliation_date <= ?'); params.push(to); }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const query = `
       SELECT
         store_id,
         COUNT(*) as total_orders,
         SUM(CASE WHEN status = 'matched' THEN 1 ELSE 0 END) as matched,
         SUM(CASE WHEN status != 'matched' THEN 1 ELSE 0 END) as discrepancies,
-        ROUND(SUM(CASE WHEN status = 'matched' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as accuracy_pct,
-        SUM(is_high_priority) as high_priority_count,
-        ROUND(SUM(expected_amount), 2) as total_expected,
-        ROUND(SUM(COALESCE(actual_amount, 0)), 2) as total_actual,
-        ROUND(SUM(COALESCE(variance_amount, -expected_amount)), 2) as total_variance
+        ROUND(SUM(COALESCE(variance_amount, -expected_amount)), 2) as total_variance,
+        ROUND(AVG(COALESCE(ABS(variance_pct), 0)), 2) as avg_variance_pct,
+        ROUND(
+          SUM(CASE WHEN status != 'matched' THEN 1 ELSE 0 END) * 100.0 / COUNT(*),
+          2
+        ) as discrepancy_rate
       FROM reconciliations
-      WHERE 1=1
+      ${whereClause}
+      GROUP BY store_id
+      ORDER BY discrepancy_rate DESC
     `;
-    const params = [];
 
-    if (from) { query += ` AND reconciliation_date >= ?`; params.push(from); }
-    if (to) { query += ` AND reconciliation_date <= ?`; params.push(to); }
+    const data = db.prepare(query).all(...params);
 
-    query += ` GROUP BY store_id ORDER BY accuracy_pct ASC`;
-
-    const rows = db.prepare(query).all(...params);
-    res.json({ success: true, stores: rows });
+    res.json({ data });
   } catch (err) {
     next(err);
   }
@@ -63,47 +97,80 @@ router.get('/stores', (req, res, next) => {
  *     parameters:
  *       - in: query
  *         name: from
- *         schema: { type: string }
+ *         schema:
+ *           type: string
+ *         description: Start date (YYYY-MM-DD)
  *         example: "2024-01-15"
  *       - in: query
  *         name: to
- *         schema: { type: string }
+ *         schema:
+ *           type: string
+ *         description: End date (YYYY-MM-DD)
  *         example: "2024-01-19"
  *       - in: query
  *         name: store_id
- *         schema: { type: string }
+ *         schema:
+ *           type: string
+ *         description: Filter by store ID
  *     responses:
  *       200:
  *         description: Per-day accuracy stats
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       date:
+ *                         type: string
+ *                       total_orders:
+ *                         type: integer
+ *                       matched:
+ *                         type: integer
+ *                       discrepancies:
+ *                         type: integer
+ *                       total_variance:
+ *                         type: number
+ *                       accuracy_rate:
+ *                         type: number
  */
 router.get('/daily', (req, res, next) => {
   try {
     const { from, to, store_id } = req.query;
 
-    let query = `
+    const conditions = [];
+    const params = [];
+
+    if (store_id) { conditions.push('store_id = ?'); params.push(store_id); }
+    if (from) { conditions.push('reconciliation_date >= ?'); params.push(from); }
+    if (to) { conditions.push('reconciliation_date <= ?'); params.push(to); }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const query = `
       SELECT
-        reconciliation_date,
+        reconciliation_date as date,
         COUNT(*) as total_orders,
         SUM(CASE WHEN status = 'matched' THEN 1 ELSE 0 END) as matched,
         SUM(CASE WHEN status != 'matched' THEN 1 ELSE 0 END) as discrepancies,
-        ROUND(SUM(CASE WHEN status = 'matched' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as accuracy_pct,
-        SUM(is_high_priority) as high_priority_count,
-        ROUND(SUM(expected_amount), 2) as total_expected,
-        ROUND(SUM(COALESCE(actual_amount, 0)), 2) as total_actual,
-        ROUND(SUM(COALESCE(variance_amount, -expected_amount)), 2) as total_variance
+        ROUND(SUM(COALESCE(variance_amount, -expected_amount)), 2) as total_variance,
+        ROUND(
+          SUM(CASE WHEN status = 'matched' THEN 1 ELSE 0 END) * 100.0 / COUNT(*),
+          2
+        ) as accuracy_rate
       FROM reconciliations
-      WHERE 1=1
+      ${whereClause}
+      GROUP BY reconciliation_date
+      ORDER BY reconciliation_date ASC
     `;
-    const params = [];
 
-    if (store_id) { query += ` AND store_id = ?`; params.push(store_id); }
-    if (from) { query += ` AND reconciliation_date >= ?`; params.push(from); }
-    if (to) { query += ` AND reconciliation_date <= ?`; params.push(to); }
+    const data = db.prepare(query).all(...params);
 
-    query += ` GROUP BY reconciliation_date ORDER BY reconciliation_date ASC`;
-
-    const rows = db.prepare(query).all(...params);
-    res.json({ success: true, daily: rows });
+    res.json({ data });
   } catch (err) {
     next(err);
   }
