@@ -2,8 +2,8 @@
 
 A backend API that automates cash payment reconciliation for Bodega Verde's 150+ physical stores. Ingests order data and cash collection reports via CSV upload, matches them, flags discrepancies, and exposes results through a queryable REST API.
 
-**Live API:** [https://bodega-verde-api.vercel.app](https://bodega-verde-api.vercel.app)
-**Swagger UI:** [https://bodega-verde-api.vercel.app/api/docs](https://bodega-verde-api.vercel.app/api/docs)
+**Live API:** https://bodega-verde-api.vercel.app
+**Swagger UI:** https://bodega-verde-api.vercel.app/api/docs
 
 ---
 
