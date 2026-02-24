@@ -1,5 +1,4 @@
 import swaggerJsdoc from 'swagger-jsdoc';
-import swaggerUi from 'swagger-ui-express';
 import { fileURLToPath } from 'url';
 import { join, dirname } from 'path';
 
@@ -29,4 +28,3 @@ const options = {
 };
 
 export const swaggerSpec = swaggerJsdoc(options);
-export { swaggerUi };
