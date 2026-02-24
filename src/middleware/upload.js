@@ -3,11 +3,21 @@ import path from 'path';
 
 const storage = multer.memoryStorage();
 
+const ALLOWED_MIME = new Set([
+  'text/csv',
+  'application/csv',
+  'application/vnd.ms-excel',
+  'text/plain',
+  'application/octet-stream', // curl and some clients send this for .csv
+]);
+
 function csvFilter(req, file, cb) {
   const ext = path.extname(file.originalname).toLowerCase();
-  const mime = file.mimetype;
 
-  if (ext !== '.csv' || !['text/csv', 'application/csv', 'application/vnd.ms-excel', 'text/plain'].includes(mime)) {
+  if (ext !== '.csv') {
+    return cb(Object.assign(new Error('Only .csv files are accepted'), { status: 400 }), false);
+  }
+  if (!ALLOWED_MIME.has(file.mimetype)) {
     return cb(Object.assign(new Error('Only .csv files are accepted'), { status: 400 }), false);
   }
   cb(null, true);
